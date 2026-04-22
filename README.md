@@ -6,7 +6,7 @@ A high-performance demographic intelligence API built for **Insighta Labs**. Thi
 
 ##  Project Links
 * **GitHub Repository:** https://github.com/viviandev0/hng-stage2-query-engine-BE/
-* **Live API Host:**
+* **Live API Host:** https://hng-stage2-query-engine-be.vercel.app/
 
 ---
 
