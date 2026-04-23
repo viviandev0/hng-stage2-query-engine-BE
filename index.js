@@ -3,107 +3,130 @@ const cors = require('cors');
 const db = require('./db');
 const app = express();
 
-app.use(cors());
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// --- 1. SHARED CORE LOGIC ---
-const getProfiles = async (queryParams) => {
-    let { 
-        gender, age_group, country_id, min_age, max_age, 
-        min_gender_probability, min_country_probability,
-        sort_by = 'created_at', order = 'desc', page = 1, limit = 10 
-    } = queryParams;
-
-    // Strict sort validation
-    const allowedSort = ['age', 'created_at', 'gender_probability'];
-    if (sort_by && !allowedSort.includes(sort_by)) return { error: "Invalid query parameters" };
-
-    const pageInt = Number(page) || 1;
-    const limitInt = Math.min(Number(limit) || 10, 50);
-    const offset = (pageInt - 1) * limitInt;
-
-    let conditions = [];
-    let params = [];
-
-    const addFilter = (val, col, op = '=') => {
-        if (val !== undefined && val !== null && val !== '') {
-            params.push(val);
-            conditions.push(`${col} ${op} $${params.length}`);
-        }
-    };
-
-    addFilter(gender, 'gender');
-    addFilter(age_group, 'age_group');
-    addFilter(country_id?.toUpperCase(), 'country_id');
-    addFilter(min_age, 'age', '>=');
-    addFilter(max_age, 'age', '<=');
-    addFilter(min_gender_probability, 'gender_probability', '>=');
-    addFilter(min_country_probability, 'country_probability', '>=');
-
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const countRes = await db.query(`SELECT COUNT(*) FROM profiles ${where}`, params);
-    const total = Number(countRes.rows[0].count);
-
-    const dataRes = await db.query(`
-        SELECT * FROM profiles ${where} 
-        ORDER BY ${sort_by} ${order.toUpperCase() === 'ASC' ? 'ASC' : 'DESC'} 
-        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
-    `, [...params, limitInt, offset]);
-
-    return {
-        status: "success",
-        page: pageInt,
-        limit: limitInt,
-        total: total,
-        data: dataRes.rows
-    };
+/**
+ * HELPER: Ensures numbers are returned as integers, not strings.
+ * This fixes the "pagination envelope invalid" error.
+ */
+const toNum = (val, fallback) => {
+    const parsed = parseInt(val);
+    return isNaN(parsed) ? fallback : parsed;
 };
 
-// --- 2. ENDPOINTS ---
-
-app.get('/api/profiles', async (req, res) => {
+/**
+ * CORE LOGIC: Reusable function to fetch data from DB.
+ * Shared by both /api/profiles and /api/profiles/search.
+ */
+async function fetchProfiles(filters, res) {
     try {
-        const result = await getProfiles(req.query);
-        if (result.error) return res.status(400).json({ status: "error", message: result.error });
-        res.status(200).json(result);
-    } catch (e) {
-        res.status(500).json({ status: "error", message: "Server failure" });
-    }
-});
+        let { 
+            gender, age_group, country_id, min_age, max_age, 
+            min_gender_probability, min_country_probability,
+            sort_by = 'created_at', order = 'desc', page = 1, limit = 10 
+        } = filters;
 
-app.get('/api/profiles/search', async (req, res) => {
-    try {
-        const { q, page, limit } = req.query;
-        if (!q) return res.status(400).json({ status: "error", message: "Invalid query parameters" });
-
-        const text = q.toLowerCase();
-        let filters = {};
-
-        // Parsing logic
-        if (text.includes('female')) filters.gender = 'female';
-        else if (text.includes('male')) filters.gender = 'male';
-        
-        ['teenager', 'adult', 'senior', 'child'].forEach(g => {
-            if (text.includes(g)) filters.age_group = g;
-        });
-
-        if (text.includes('young')) { filters.min_age = 16; filters.max_age = 24; }
-        const aboveMatch = text.match(/above\s+(\d+)/);
-        if (aboveMatch) filters.min_age = parseInt(aboveMatch[1]);
-
-        const countries = { 'nigeria': 'NG', 'kenya': 'KE', 'angola': 'AO', 'ghana': 'GH' };
-        for (const [n, c] of Object.entries(countries)) { if (text.includes(n)) filters.country_id = c; }
-
-        if (Object.keys(filters).length === 0) {
-            return res.status(400).json({ status: "error", message: "Unable to interpret query" });
+        // Requirement: Strict Sorting Validation
+        const allowedSort = ['age', 'created_at', 'gender_probability'];
+        if (sort_by && !allowedSort.includes(sort_by)) {
+            return res.status(400).json({ status: "error", message: "Invalid query parameters" });
         }
 
-        const result = await getProfiles({ ...filters, page, limit });
-        res.status(200).json(result);
-    } catch (e) {
-        res.status(500).json({ status: "error", message: "Server failure" });
+        const p = toNum(page, 1);
+        const l = Math.min(toNum(limit, 10), 50);
+        const offset = (p - 1) * l;
+
+        let conds = [];
+        let params = [];
+
+        // Helper to add AND conditions safely
+        const add = (val, col, op = '=') => {
+            if (val !== undefined && val !== null && val !== '') {
+                params.push(val);
+                conds.push(`${col} ${op} $${params.length}`);
+            }
+        };
+
+        if (gender) add(gender.toLowerCase(), 'gender');
+        if (age_group) add(age_group.toLowerCase(), 'age_group');
+        if (country_id) add(country_id.toUpperCase(), 'country_id');
+        if (min_age) add(toNum(min_age), 'age', '>=');
+        if (max_age) add(toNum(max_age), 'age', '<=');
+        if (min_gender_probability) add(parseFloat(min_gender_probability), 'gender_probability', '>=');
+        if (min_country_probability) add(parseFloat(min_country_probability), 'country_probability', '>=');
+
+        const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
+        
+        // Get Total Count for Pagination
+        const countResult = await db.query(`SELECT COUNT(*) FROM profiles ${where}`, params);
+        const totalCount = toNum(countResult.rows[0].count, 0);
+
+        // Fetch Data
+        const dataResult = await db.query(`
+            SELECT * FROM profiles ${where} 
+            ORDER BY ${sort_by} ${order.toLowerCase() === 'asc' ? 'ASC' : 'DESC'} 
+            LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+        `, [...params, l, offset]);
+
+        // SUCCESS ENVELOPE: Explicit integers for page, limit, total
+        return res.status(200).json({
+            status: "success",
+            page: p,
+            limit: l,
+            total: totalCount,
+            data: dataResult.rows
+        });
+    } catch (err) {
+        console.error("DB Error:", err);
+        return res.status(500).json({ status: "error", message: "Server failure" });
     }
+}
+
+// 📡 Standard Filtering Endpoint
+app.get('/api/profiles', (req, res) => fetchProfiles(req.query, res));
+
+// 📡 Natural Language Search Endpoint
+app.get('/api/profiles/search', (req, res) => {
+    const { q, page, limit } = req.query;
+    if (!q || q.trim() === "") {
+        return res.status(400).json({ status: "error", message: "Invalid query parameters" });
+    }
+
+    const text = q.toLowerCase();
+    let f = { page, limit };
+
+    // 1. Gender keywords
+    if (text.includes('female')) f.gender = 'female';
+    else if (text.includes('male')) f.gender = 'male';
+
+    // 2. Special keywords ("young" = 16-24)
+    if (text.includes('young')) { f.min_age = 16; f.max_age = 24; }
+
+    // 3. Age groups
+    ['teenager', 'adult', 'senior', 'child'].forEach(g => {
+        if (text.includes(g)) f.age_group = g;
+    });
+
+    // 4. "Above X" regex
+    const above = text.match(/above\s+(\d+)/);
+    if (above) f.min_age = above[1];
+
+    // 5. Country mappings
+    const cMap = { 'nigeria': 'NG', 'kenya': 'KE', 'angola': 'AO', 'ghana': 'GH', 'benin': 'BJ' };
+    Object.keys(cMap).forEach(name => {
+        if (text.includes(name)) f.country_id = cMap[name];
+    });
+
+    // Check if we managed to parse any demographic filters
+    const hasFilters = Object.keys(f).some(key => key !== 'page' && key !== 'limit');
+    if (!hasFilters) {
+        return res.status(400).json({ status: "error", message: "Unable to interpret query" });
+    }
+
+    return fetchProfiles(f, res);
 });
 
+// Start Server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Engine running on ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Engine active on ${PORT}`));
