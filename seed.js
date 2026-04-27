@@ -1,15 +1,24 @@
 const db = require('./db');
 const fs = require('fs');
+const uuidv7 = require('uuidv7').uuidv7;
 
 const seedData = async () => {
     try {
-        // 1. Read the JSON file (Make sure the filename matches what you downloaded)
+        // 1. Read the file
         const rawData = fs.readFileSync('seed_profiles.json');
-        const profiles = JSON.parse(rawData);
+        const jsonData = JSON.parse(rawData);
 
-        console.log(`Checking data: Found ${profiles.length} records.`);
+        // 2. Change: Point specifically to the "profiles" key in the JSON
+        const profiles = jsonData.profiles;
 
-        // 2. Insert each profile into the database
+        if (!profiles || !Array.isArray(profiles)) {
+            console.error("❌ Error: Could not find the 'profiles' list in seed_profiles.json.");
+            process.exit(1);
+        }
+
+        console.log(`Checking data: Found ${profiles.length} records in the JSON.`);
+
+        // 3. Change: Loop through profiles and insert into profiles table
         for (const p of profiles) {
             const query = `
                 INSERT INTO profiles (
@@ -20,14 +29,22 @@ const seedData = async () => {
             `;
 
             const values = [
-                p.id, p.name.toLowerCase(), p.gender, p.gender_probability, p.age,
-                p.age_group, p.country_id, p.country_name, p.country_probability, p.created_at
+                p.id || uuidv7(), 
+                p.name ? p.name.toLowerCase() : null,
+                p.gender,
+                p.gender_probability,
+                p.age,
+                p.age_group,
+                p.country_id,
+                p.country_name,
+                p.country_probability,
+                p.created_at || new Date().toISOString()
             ];
 
             await db.query(query, values);
         }
 
-        console.log("✅ Seeding successful! 2,026 profiles are now in Railway.");
+        console.log("✅ Seeding successful! All records are now in profiles on Railway.");
         process.exit(0);
     } catch (error) {
         console.error("❌ Seeding failed:", error);

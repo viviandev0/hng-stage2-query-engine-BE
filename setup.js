@@ -2,7 +2,7 @@ const db = require ('./db');
 
 const createTable = async () => {
   const sql = `
-    CREATE TABLE IF NOT EXISTS profiles_2 (
+    CREATE TABLE IF NOT EXISTS profiles (
       id UUID PRIMARY KEY,
       name VARCHAR(255) UNIQUE NOT NULL,
       gender VARCHAR(50),
