@@ -9,6 +9,7 @@ const authRoutes = require('./routes/authRoutes');
 const { authenticate, authorize } = require('./middleware/authMiddleware');
 
 const app = express();
+app.set('trust proxy', 1);
 
 // --- 2. LOGGING MIDDLEWARE (Required for Stage 3) ---
 app.use((req, res, next) => {

@@ -1,105 +1,119 @@
 const axios = require('axios');
 const jwt = require('jsonwebtoken');
-const pool = require('../db'); // Your Stage 2 DB connection
+const pool = require('../db'); // Ensure this points to your Stage 2 database config
 const { v7: uuidv7 } = require('uuid');
 
+/**
+ * Helper to generate both Access and Refresh tokens
+ * Note: Uses names matching typical Stage 3 .env patterns
+ */
 const generateTokens = (user) => {
     const payload = { id: user.id, role: user.role };
-    const accessToken = jwt.sign(payload, process.env.JWT_ACCESS_SECRET, { expiresIn: '3m' });
-    const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, { expiresIn: '5m' });
+    
+    // Access Token: Short-lived (3 mins)
+    const accessToken = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '3m' });
+    
+    // Refresh Token: Slightly longer (5 mins)
+    const refreshToken = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '5m' });
+    
     return { accessToken, refreshToken };
 };
 
+/**
+ * GitHub OAuth Callback
+ * Handles: Code exchange, User Profile fetch, and DB Upsert
+ */
 exports.githubCallback = async (req, res) => {
-    const { code, code_verifier } = req.query; // code_verifier comes from CLI/Web
+    const { code } = req.query;
+
+    if (!code) {
+        return res.status(400).json({ status: 'error', message: 'No code provided from GitHub' });
+    }
 
     try {
-        // 1. Exchange code for GitHub Access Token
+        // 1. Exchange temporary code for GitHub Access Token
         const tokenResponse = await axios.post('https://github.com/login/oauth/access_token', {
             client_id: process.env.GITHUB_CLIENT_ID,
             client_secret: process.env.GITHUB_CLIENT_SECRET,
             code,
-            // code_verifier, // Used if implementing PKCE strictly on backend
         }, { headers: { Accept: 'application/json' } });
 
         const ghToken = tokenResponse.data.access_token;
 
-        // 2. Get User Info from GitHub
+        if (!ghToken) {
+            return res.status(400).json({ status: 'error', message: 'Invalid GitHub code or secret' });
+        }
+
+        // 2. Fetch User Profile from GitHub API
         const userResponse = await axios.get('https://api.github.com/user', {
             headers: { Authorization: `Bearer ${ghToken}` }
         });
 
         const { id: github_id, login: username, email, avatar_url } = userResponse.data;
 
-        // 3. Check if user exists in DB, or create them
-        // Check if user exists first
-        const existingUser = await pool.query('SELECT * FROM users WHERE github_id = $1', [githubData.id]);
+        // 3. Database "Upsert" (Find or Create)
+        let userResult = await pool.query('SELECT * FROM users WHERE github_id = $1', [github_id.toString()]);
 
-        if (existingUser.rows.length > 0) {
-            // UPDATE existing user (so they can log in again)
-            const user = existingUser.rows[0];
-            // Generate tokens for this user...
-        } else {
-            // INSERT new user
-            // Generate tokens for new user...
-        }
-        let user = await pool.query('SELECT * FROM users WHERE github_id = $1', [github_id.toString()]);
-
-        if (user.rows.length === 0) {
+        let user;
+        if (userResult.rows.length === 0) {
+            // New user: Insert them
             const newUser = await pool.query(
                 'INSERT INTO users (id, github_id, username, email, avatar_url, role) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-                [uuidv7(), github_id.toString(), username, email, avatar_url, 'analyst']
+                [uuidv7(), github_id.toString(), username, email || null, avatar_url, 'analyst']
             );
-            user = newUser;
+            user = newUser.rows[0];
+        } else {
+            // Existing user: Just use their data
+            user = userResult.rows[0];
         }
 
-        // 4. Issue Insighta Tokens
-        const tokens = generateTokens(user.rows[0]);
+        // 4. Generate Insighta Labs+ JWTs
+        const tokens = generateTokens(user);
 
-        // 5. Send back to user (or set cookies for Web)
+        // 5. Send tokens to client
         res.json({ status: 'success', ...tokens });
 
     } catch (error) {
-        res.status(500).json({ status: 'error', message: error.message });
+        console.error("Auth Error:", error.message);
+        res.status(500).json({ status: 'error', message: "Internal Server Error during authentication" });
     }
 };
 
-// --- REFRESH TOKEN LOGIC ---
+/**
+ * Refresh Token Route
+ * Allows user to get a new Access Token without logging in again
+ */
 exports.refreshToken = async (req, res) => {
     const { refresh_token } = req.body;
 
     if (!refresh_token) {
-        return res.status(400).json({ status: "error", message: "Refresh token required" });
+        return res.status(400).json({ status: "error", message: "Refresh token is required" });
     }
 
     try {
-        // 1. Verify the refresh token
-        const decoded = jwt.verify(refresh_token, process.env.JWT_REFRESH_SECRET);
+        const decoded = jwt.verify(refresh_token, process.env.JWT_SECRET);
 
-        // 2. Find user in DB to ensure they still exist/are active
         const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [decoded.id]);
         const user = userRes.rows[0];
 
-        if (!user || !user.is_active) {
-            return res.status(403).json({ status: "error", message: "User inactive or not found" });
+        if (!user) {
+            return res.status(403).json({ status: "error", message: "User no longer exists" });
         }
 
-        // 3. Issue a FRESH pair (Rotation)
         const tokens = generateTokens(user);
-
         res.json({ status: "success", ...tokens });
+
     } catch (err) {
-        // If token is expired or fake
         res.status(401).json({ status: "error", message: "Invalid or expired refresh token" });
     }
 };
 
-// --- LOGOUT LOGIC ---
+/**
+ * Logout Route
+ * Clears cookies (used for the Web Portal portion)
+ */
 exports.logout = (req, res) => {
-    // On the backend, we don't necessarily "delete" the JWT (since it's stateless)
-    // But for the Web Portal, we clear the cookies.
     res.clearCookie('access_token');
     res.clearCookie('refresh_token');
-    
     res.json({ status: "success", message: "Logged out successfully" });
 };
